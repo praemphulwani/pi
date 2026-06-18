@@ -522,6 +522,15 @@ export class AgentSession {
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
+
+				// Check if the tool result has pushed the context over the threshold
+				if (event.message.role === "toolResult") {
+					const lastAssistant = this._findLastAssistantMessage();
+					if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
+						// Compaction was triggered and completed.
+						// The agent loop will continue with the new compacted state.
+					}
+				}
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -1879,7 +1888,7 @@ export class AgentSession {
 			}
 			contextTokens = estimate.tokens;
 		} else {
-			contextTokens = calculateContextTokens(assistantMessage.usage);
+			contextTokens = estimateContextTokens(this.agent.state.messages).tokens;
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			return await this._runAutoCompaction("threshold", false);
