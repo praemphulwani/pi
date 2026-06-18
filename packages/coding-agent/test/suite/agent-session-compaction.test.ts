@@ -5,6 +5,7 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { estimateTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
@@ -67,19 +68,20 @@ function useSummaryStreamFn(harness: Harness, summary: string): () => number {
 }
 
 function seedCompactableSession(harness: Harness): void {
+	harness.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
 	const now = Date.now();
 	harness.sessionManager.appendMessage({
 		role: "user",
 		content: [{ type: "text", text: "message to compact" }],
 		timestamp: now - 1000,
 	});
-	harness.sessionManager.appendMessage(
-		createAssistant(harness, {
-			stopReason: "stop",
-			totalTokens: 100,
-			timestamp: now - 500,
-		}),
-	);
+	const assistant = createAssistant(harness, {
+		stopReason: "stop",
+		totalTokens: 100,
+		timestamp: now - 500,
+	});
+	assistant.content = [{ type: "text", text: "assistant response to compact" }];
+	harness.sessionManager.appendMessage(assistant);
 	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 }
 
@@ -96,6 +98,7 @@ describe("AgentSession compaction characterization", () => {
 
 	it("manually compacts using an extension-provided summary", async () => {
 		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => ({
@@ -116,8 +119,10 @@ describe("AgentSession compaction characterization", () => {
 
 		const result = await harness.session.compact();
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		const estimatedTokensAfter = harness.session.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 
 		expect(result.summary).toBe("summary from extension");
+		expect(result.estimatedTokensAfter).toBe(estimatedTokensAfter);
 		expect(compactionEntries).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
 	});
@@ -145,7 +150,7 @@ describe("AgentSession compaction characterization", () => {
 
 		const result = await harness.session.compact();
 
-		expect(result.summary).toBe("summary from custom stream");
+		expect(result.summary).toContain("summary from custom stream");
 		expect(getStreamCallCount()).toBe(1);
 	});
 
@@ -159,12 +164,15 @@ describe("AgentSession compaction characterization", () => {
 		await sessionInternals._runAutoCompaction("threshold", false);
 
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
 		expect(compactionEntries).toHaveLength(1);
+		expect(compactionEnd?.result?.estimatedTokensAfter).toBeGreaterThan(0);
 		expect(getStreamCallCount()).toBe(1);
 	});
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {
 		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => {
